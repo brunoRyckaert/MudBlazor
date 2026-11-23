@@ -693,6 +693,29 @@ public class ChartSizingTests : BunitTest
     }
 
     /// <summary>
+    /// A chart that fills its parent makes room for its axis labels as soon as they are measured, without waiting for the resize debounce.
+    /// </summary>
+    [Test]
+    public void LineChartMakesRoomForMeasuredAxisLabelsWithoutTheResizeDebounce()
+    {
+        // The element is wider than the default bounds, so its size is applied through the debounce's leading call.
+        Context.JSInterop.Setup<ElementSize>("mudObserveElementSize", _ => true).SetResult(new ElementSize { Width = 800, Height = 350, Timestamp = 1 });
+        Context.JSInterop.Setup<ElementSize>("mudGetSvgBBox", _ => true).SetResult(new ElementSize { Width = 50, Height = 20 });
+
+        var comp = Context.Render<MudChart<double>>(parameters => parameters
+            .Add(p => p.ChartType, ChartType.Line)
+            .Add(p => p.ChartSeries, [new ChartSeries<double> { Name = "Series 1", Data = new double[] { 10, 20, 30 } }])
+            .Add(p => p.ChartLabels, ["Jan", "Feb", "Mar"])
+            .Add(p => p.MatchBoundsToSize, true)
+            .Add(p => p.Width, "100%")
+            .Add(p => p.Height, "350px"));
+
+        // A label correction sent through the debounce would still be waiting here, with the plot at the 30 px minimum margin.
+        comp.Find("svg").GetAttribute("viewBox").Should().Be("0 0 800 350");
+        comp.Find("path.mud-chart-line").GetAttribute("d").Should().StartWith("M 60 ");
+    }
+
+    /// <summary>
     /// A chart first rendered while hidden measures empty axis labels, so hovering it after it is shown measures them again and makes room for them.
     /// </summary>
     [Test]

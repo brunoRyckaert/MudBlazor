@@ -308,9 +308,16 @@ public abstract class MudAxisChartBase<T, TOptions> : MudChartBase<T, TOptions>,
     /// <summary>
     /// Handles the change of an axis.
     /// </summary>
+    /// <remarks>
+    /// Meant to be bound to <see cref="BaseAxisChart{T, TOptions}.AxisChanged"/>, whose event callback renders the chart again afterwards.
+    /// </remarks>
     protected void AxisChanged()
     {
-        DebouncedRebuild();
+        // The labels are measured right after a rebuild, often one that a new element size just started through the resize debounce.
+        // Debouncing the correction too would leave a layout made for the wrong label sizes on screen for the whole interval.
+        // Labels are only reported as changed when their size differs.
+        // Where the rebuild places the labels doesn't change their size, so measuring them again finds the same size and asks for no further rebuild.
+        RebuildChart();
     }
 
     /// <summary>
