@@ -726,6 +726,164 @@ public class ChartSizingTests : BunitTest
         AxisMeasurements().Should().Be(measured);
     }
 
+    /// <summary>
+    /// A chart that fills its parent hides its first layout with labels until they are measured, and shows the layout built for their measured size.
+    /// </summary>
+    [Test]
+    public async Task LineChartFillingItsParentStaysHiddenUntilItsAxisLabelsAreMeasured()
+    {
+        Context.JSInterop.Setup<ElementSize>("mudObserveElementSize", _ => true).SetResult(new ElementSize { Width = 800, Height = 350, Timestamp = 1 });
+        var measurement = Context.JSInterop.Setup<ElementSize>("mudGetSvgBBox", _ => true);
+
+        var comp = RenderFilledLineChart();
+
+        await comp.WaitForAssertionAsync(() => comp.FindAll("path.mud-chart-line").Should().NotBeEmpty());
+        SvgStyle(comp).Should().Contain("visibility:hidden");
+
+        measurement.SetResult(new ElementSize { Width = 50, Height = 20 });
+
+        await comp.WaitForAssertionAsync(() =>
+        {
+            SvgStyle(comp).Should().NotContain("visibility");
+            comp.Find("path.mud-chart-line").GetAttribute("d").Should().StartWith("M 60 ");
+        });
+    }
+
+    /// <summary>
+    /// A chart that fills its parent stays hidden while a rebuild for its measured axis labels is pending, even when another measurement of the same labels finds nothing changed.
+    /// </summary>
+    [Test]
+    public async Task LineChartFillingItsParentIsOnlyShownWithTheLayoutForItsMeasuredAxisLabels()
+    {
+        // The browser answers each call a while later, as it does outside of tests, so measurements of the same labels overlap.
+        var observe = Context.JSInterop.Setup<ElementSize>("mudObserveElementSize", _ => true);
+        var measurement = Context.JSInterop.Setup<ElementSize>("mudGetSvgBBox", _ => true);
+
+        var comp = RenderFilledLineChart();
+        var shownLayouts = new List<string>();
+        comp.OnMarkupUpdated += (_, _) =>
+        {
+            var line = comp.FindAll("path.mud-chart-line").FirstOrDefault();
+            if (line is not null && !SvgStyle(comp).Contains("visibility"))
+            {
+                shownLayouts.Add(line.GetAttribute("d") ?? string.Empty);
+            }
+        };
+
+        await comp.InvokeAsync(() => observe.SetResult(new ElementSize { Width = 800, Height = 350, Timestamp = 1 }));
+        await comp.WaitForAssertionAsync(() => comp.FindAll("path.mud-chart-line").Should().NotBeEmpty());
+        await comp.InvokeAsync(() => measurement.SetResult(new ElementSize { Width = 50, Height = 20 }));
+
+        await comp.WaitForAssertionAsync(() => shownLayouts.Should().NotBeEmpty());
+        shownLayouts.Should().AllSatisfy(d => d.Should().StartWith("M 60 "));
+    }
+
+    /// <summary>
+    /// A chart that fills its parent and gets new data while the rebuild for its measured axis labels is pending stays hidden until the new labels are measured too,
+    /// since that data's layout is built for the size of the old labels.
+    /// </summary>
+    [Test]
+    public async Task LineChartFillingItsParentStaysHiddenUntilTheLabelsOfNewDataAreMeasured()
+    {
+        Context.JSInterop.Setup<ElementSize>("mudObserveElementSize", _ => true).SetResult(new ElementSize { Width = 800, Height = 350, Timestamp = 1 });
+        var newData = false;
+        var measurement = Context.JSInterop.Setup<ElementSize>("mudGetSvgBBox", _ => !newData);
+        var newDataMeasurement = Context.JSInterop.Setup<ElementSize>("mudGetSvgBBox", _ => newData);
+
+        var comp = RenderFilledLineChart();
+        var shownLayouts = new List<string>();
+        comp.OnMarkupUpdated += (_, _) =>
+        {
+            var line = comp.FindAll("path.mud-chart-line").FirstOrDefault();
+            if (line is not null && !SvgStyle(comp).Contains("visibility"))
+            {
+                shownLayouts.Add(line.GetAttribute("d") ?? string.Empty);
+            }
+        };
+
+        await comp.WaitForAssertionAsync(() => comp.FindAll("path.mud-chart-line").Should().NotBeEmpty());
+        await comp.InvokeAsync(() => measurement.SetResult(new ElementSize { Width = 50, Height = 20 }));
+
+        // Both axes of those labels are measured, and the measured sizes reported, before the data changes.
+        await comp.WaitForAssertionAsync(() => Context.JSInterop.Invocations["mudGetSvgBBox"].Count.Should().BeGreaterThanOrEqualTo(2));
+
+        // While the rebuild for the measured labels waits out the resize debounce, new data with wider labels arrives.
+        // A chart that rebuilds at once has already shown the measured layout, so no data can arrive while its rebuild is pending.
+        Assume.That(SvgStyle(comp), Does.Contain("visibility:hidden"), "The rebuild for the measured labels is no longer pending.");
+        newData = true;
+        await comp.SetParametersAndRenderAsync(parameters => parameters
+            .Add(p => p.ChartSeries, [new ChartSeries<double> { Name = "Series 1", Data = new double[] { 1000, 2000, 3000 } }]));
+        await comp.InvokeAsync(() => newDataMeasurement.SetResult(new ElementSize { Width = 120, Height = 20 }));
+
+        await comp.WaitForAssertionAsync(() => shownLayouts.Should().NotBeEmpty());
+        shownLayouts.Should().AllSatisfy(d => d.Should().StartWith("M 130 "));
+    }
+
+    /// <summary>
+    /// A chart that fills its parent is shown with its default layout when its axis labels can't be measured, since no better layout will come.
+    /// </summary>
+    [Test]
+    public async Task LineChartFillingItsParentIsShownWhenItsAxisLabelsCannotBeMeasured()
+    {
+        Context.JSInterop.Setup<ElementSize>("mudObserveElementSize", _ => true).SetResult(new ElementSize { Width = 800, Height = 350, Timestamp = 1 });
+        Context.JSInterop.Setup<ElementSize>("mudGetSvgBBox", _ => true).SetException(new JSDisconnectedException("disconnected"));
+
+        var comp = RenderFilledLineChart();
+
+        await comp.WaitForAssertionAsync(() =>
+        {
+            comp.FindAll("path.mud-chart-line").Should().NotBeEmpty();
+            SvgStyle(comp).Should().NotContain("visibility");
+        });
+    }
+
+    /// <summary>
+    /// A chart that fills its parent is shown when it measures its axis labels inside a hidden container, so hovering it once the container is shown can measure them again.
+    /// </summary>
+    [Test]
+    public async Task LineChartFillingItsParentIsShownWhenItsAxisLabelsAreMeasuredWhileHidden()
+    {
+        Context.JSInterop.Setup<ElementSize>("mudObserveElementSize", _ => true).SetResult(new ElementSize { Width = 800, Height = 350, Timestamp = 1 });
+        Context.JSInterop.Setup<ElementSize>("mudGetSvgBBox", _ => true).SetResult(new ElementSize { Width = 0, Height = 0 });
+
+        var comp = RenderFilledLineChart();
+
+        await comp.WaitForAssertionAsync(() =>
+        {
+            comp.FindAll("path.mud-chart-line").Should().NotBeEmpty();
+            SvgStyle(comp).Should().NotContain("visibility");
+        });
+    }
+
+    /// <summary>
+    /// A chart with a fixed size is laid out with its labels from its first render, which may be prerendered, so it is never hidden.
+    /// </summary>
+    [Test]
+    public void LineChartWithAFixedSizeIsNotHiddenWhileItsAxisLabelsAreMeasured()
+    {
+        Context.JSInterop.Setup<ElementSize>("mudGetSvgBBox", _ => true);
+
+        var comp = Context.Render<MudChart<double>>(parameters => parameters
+            .Add(p => p.ChartType, ChartType.Line)
+            .Add(p => p.ChartSeries, [new ChartSeries<double> { Name = "Series 1", Data = new double[] { 10, 20, 30 } }])
+            .Add(p => p.ChartLabels, ["Jan", "Feb", "Mar"]));
+
+        comp.FindAll("path.mud-chart-line").Should().NotBeEmpty();
+        SvgStyle(comp).Should().NotContain("visibility");
+    }
+
+    private IRenderedComponent<MudChart<double>> RenderFilledLineChart() =>
+        Context.Render<MudChart<double>>(parameters => parameters
+            .Add(p => p.ChartType, ChartType.Line)
+            .Add(p => p.ChartSeries, [new ChartSeries<double> { Name = "Series 1", Data = new double[] { 10, 20, 30 } }])
+            .Add(p => p.ChartLabels, ["Jan", "Feb", "Mar"])
+            .Add(p => p.MatchBoundsToSize, true)
+            .Add(p => p.Width, "100%")
+            .Add(p => p.Height, "350px"));
+
+    private static string SvgStyle(IRenderedComponent<MudChart<double>> comp) =>
+        comp.Find("svg").GetAttribute("style") ?? string.Empty;
+
     private int AxisMeasurements() =>
         Context.JSInterop.Invocations["mudGetSvgBBox"].Count(x => x.ResultType == typeof(ElementSize));
 }

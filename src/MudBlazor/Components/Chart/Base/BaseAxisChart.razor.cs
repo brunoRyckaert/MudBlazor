@@ -32,9 +32,27 @@ public partial class BaseAxisChart<T, TChartOptions> : MudComponentBase
     private ElementSize? _lastXAxisLabelSize;
     private bool _touchToolTips;
     private MeasuredLabels? _measuredLabels;
+    private bool _layoutShown;
+    private LabelTexts? _showAfterRebuildWith;
+    private MeasuredLabels? _rebuildPendingFor;
 
     // The labels as they were last measured, by count and by the first label of each axis, which is a new object each time the chart makes its labels.
     private sealed record MeasuredLabels(int HorizontalCount, SvgText? FirstHorizontal, int VerticalCount, SvgText? FirstVertical);
+
+    // The text of the labels, which decides how big they are.
+    private sealed record LabelTexts(string?[] Horizontal, string?[] Vertical)
+    {
+        public bool Matches(LabelTexts other) => Horizontal.SequenceEqual(other.Horizontal) && Vertical.SequenceEqual(other.Vertical);
+    }
+
+    private MeasuredLabels CurrentLabels => new(HorizontalValues.Count, HorizontalValues.FirstOrDefault(), VerticalValues.Count, VerticalValues.FirstOrDefault());
+
+    private LabelTexts CurrentLabelTexts => new([.. HorizontalValues.Select(label => label.Value)], [.. VerticalValues.Select(label => label.Value)]);
+
+    // A chart that fills its parent first lays out its labels for default sizes, so that layout is hidden until one built for their measured sizes replaces it.
+    // It is laid out with labels only once the parent's size is known, which only an interactive render learns, so a static or prerendered chart is never hidden.
+    // It stays hidden rather than removed, so the browser still lays out the labels and they can be measured.
+    private bool HiddenUntilMeasured => MatchBoundsToSize && !_layoutShown && (HorizontalValues.Count > 0 || VerticalValues.Count > 0);
 
     /// <summary>
     /// The size of the Y-axis labels.
@@ -236,6 +254,7 @@ public partial class BaseAxisChart<T, TChartOptions> : MudComponentBase
     private string HoveredStylename =>
         new StyleBuilder()
             .AddStyle("overflow", "visible", HoveredSegment is not null)
+            .AddStyle("visibility", "hidden", HiddenUntilMeasured)
             .Build();
 
     private string TooltipStylename =>
@@ -243,6 +262,21 @@ public partial class BaseAxisChart<T, TChartOptions> : MudComponentBase
             .AddStyle("display", "block", HoveredSegment is not null)
             .AddStyle("display", "none", HoveredSegment is null)
             .Build();
+
+    /// <inheritdoc />
+    protected override void OnParametersSet()
+    {
+        base.OnParametersSet();
+
+        // The chart makes new labels each time it rebuilds, and every rebuild after a measurement uses the measured sizes.
+        // A rebuild for new data lays out its new text for the sizes of the old, so the chart stays hidden until that text is measured too.
+        if (_rebuildPendingFor is not null && CurrentLabels != _rebuildPendingFor)
+        {
+            _rebuildPendingFor = null;
+            _layoutShown |= _showAfterRebuildWith?.Matches(CurrentLabelTexts) == true;
+            _showAfterRebuildWith = null;
+        }
+    }
 
     /// <summary>
     /// Called after the component has been rendered.
@@ -262,13 +296,14 @@ public partial class BaseAxisChart<T, TChartOptions> : MudComponentBase
 
         // A chart makes new labels whenever it rebuilds, which a change of data, options, size or a parent render all do.
         // Hovering renders the chart again with the same labels, so measuring them again would only cost two calls into the browser.
-        var labels = new MeasuredLabels(HorizontalValues.Count, HorizontalValues.FirstOrDefault(), VerticalValues.Count, VerticalValues.FirstOrDefault());
+        var labels = CurrentLabels;
         if (!firstRender && labels == _measuredLabels)
         {
             return;
         }
 
         _measuredLabels = labels;
+        var texts = HiddenUntilMeasured ? CurrentLabelTexts : null;
 
         var yAxisLabelSize = _yAxisGroupElementReference != null ? (await JsRuntime.InvokeAsyncWithErrorHandling<ElementSize>("mudGetSvgBBox", _yAxisGroupElementReference)).value : null;
         var xAxisLabelSize = _xAxisGroupElementReference != null ? (await JsRuntime.InvokeAsyncWithErrorHandling<ElementSize>("mudGetSvgBBox", _xAxisGroupElementReference)).value : null;
@@ -312,8 +347,27 @@ public partial class BaseAxisChart<T, TChartOptions> : MudComponentBase
             }
         }
 
-        if (axisChanged && AxisChanged.HasDelegate)
+        var rebuilding = axisChanged && AxisChanged.HasDelegate;
+
+        // Only a measurement of the labels on screen decides, since a render that made newer labels measures them itself.
+        if (HiddenUntilMeasured && labels == CurrentLabels)
         {
+            // Measurements of the same labels can overlap, and once one has asked for a rebuild, the others find nothing changed.
+            if (rebuilding || _rebuildPendingFor == labels)
+            {
+                _showAfterRebuildWith = texts;
+            }
+            else
+            {
+                // With no rebuild asked for, as after a failed measurement, no better layout is coming, and a hidden chart gets no hover to measure again.
+                _layoutShown = true;
+                StateHasChanged();
+            }
+        }
+
+        if (rebuilding)
+        {
+            _rebuildPendingFor = CurrentLabels;
             await AxisChanged.InvokeAsync();
         }
     }
